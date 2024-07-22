@@ -1,10 +1,21 @@
+# Copyright (C) 2024  bluem3th
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, version 3.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
 import os.path
 import logging
 import pefile
 from capstone import CS_ARCH_X86, CS_MODE_32, Cs, CS_MODE_64
-
-SECRET_KEY_LEN = 16  # The key is a md5 digest, so length is fixed at 16.
-
 
 class exe_disassembler:
 
@@ -119,8 +130,8 @@ class exe_disassembler:
         for instr_mov in md.disasm(text_section[jump_to_address_RVA:], jump_to_address):
             if instr_mov.mnemonic == 'mov' and instr_mov.op_str.startswith('eax, '):
                 secret_num_address = instr_mov.address
-                self.SECRET_NUM = hex(int(instr_mov.op_str.split(', ')[1], 16))
-                print(f'[+] Found SECRET_NUM at [.text][{instr_mov.address:x}h] : {self.SECRET_NUM}')
+                self.SECRET_NUM = int(instr_mov.op_str.split(', ')[1], 16)
+                print(f'[+] Found SECRET_NUM at [.text][{instr_mov.address:x}h] : {hex(self.SECRET_NUM)}')
                 break
         if not secret_num_address:
             raise Exception("Cannot find opcode for 'MOV EAX, SECRET_NUM' after the JB.")
