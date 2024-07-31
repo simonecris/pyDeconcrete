@@ -1,30 +1,16 @@
-# Copyright (C) 2024  bluem3th
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, version 3.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <http://www.gnu.org/licenses/>.
-
 import os.path
-import logging
 import pefile
 from capstone import CS_ARCH_X86, CS_MODE_32, Cs, CS_MODE_64
+from abc import ABC, abstractmethod
 
-class exe_disassembler:
+SECRET_KEY_LEN = 16
 
+
+class BinaryDisassembler(ABC):
     def __init__(self, filepath, mode):
         if not os.path.isfile(filepath):
             raise FileNotFoundError(f'Cannot find {filepath}')
 
-        self.logger = logging.getLogger('pyDeconcrete')
-        logging.basicConfig(level=logging.INFO)
         self.ARCH = CS_ARCH_X86
         if mode == 'x64':
             self.MODE = CS_MODE_64
@@ -34,12 +20,30 @@ class exe_disassembler:
         self.SECRET_KEY = ''
         self.SECRET_NUM = ''
         try:
-            self.pe = pefile.PE(filepath)
-            self.ImageBase = self.pe.OPTIONAL_HEADER.ImageBase
+            self._load_binary(filepath)
         except:
             raise Exception('Cannot parse provided file!')
 
-    def find_section(self, offset) -> tuple[pefile.SectionStructure, int] | None:
+    @abstractmethod
+    def _load_binary(self, filepath):
+        pass
+
+    @abstractmethod
+    def get_secrets(self):
+        pass
+
+
+class WindowsDisassembler(BinaryDisassembler):
+
+    def __init__(self, filepath, mode, secret_key_len):
+        super().__init__(filepath, mode)
+        self.SECRET_KEY_LEN = secret_key_len
+
+    def _load_binary(self, filepath):
+        self.pe = pefile.PE(filepath)
+        self.ImageBase = self.pe.OPTIONAL_HEADER.ImageBase
+
+    def _find_section(self, offset) -> tuple[pefile.SectionStructure, int] | None:
         if self.ImageBase:
             offset -= self.ImageBase
 
@@ -168,7 +172,7 @@ class exe_disassembler:
         if not secret_key_address:
             raise Exception("Cannot find secret key LEA instruction.")
 
-        data_section, data_section_VA = self.find_section(secret_key_address)
+        data_section, data_section_VA = self._find_section(secret_key_address)
         if '.data' not in str(data_section.Name):
             raise Exception(f"SECRET_KEY address offset pointing to {str(data_section.Name)} section, must be data....")
 

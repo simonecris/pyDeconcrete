@@ -1,85 +1,17 @@
 import argparse
+import logging
 import pathlib
-import sys
 
 import pefile
 from os.path import isfile
 
-from exeDisassembler import exe_disassembler
+from compiler_guesser import CompilerEnum
+from exeDisassembler import WindowsDisassembler
 
 from Crypto.Cipher import AES
-from Crypto.Util.Padding import unpad
-import struct
 
 SECRET_KEY_LEN = 16  # The key is a md5 digest, so length is fixed at 16.
-
-
 # https://github.com/Falldog/pyconcrete/blob/master/setup.py#L86
-
-
-class CompilerEnum:
-
-    def __init__(self, pe):
-        self.pe = pe
-        self.br = self.BinaryReader(pe)
-
-    def get_opinion(self):
-        offset_choice = "Unknown"
-
-        dos_header = self.pe.DOS_HEADER
-        nt_header = self.pe.NT_HEADERS
-
-        # Check for Rust
-        if self.is_rust():
-            return "Rustc"
-
-        # Check for Swift
-        section_names = [section.Name.decode().strip('\x00') for section in self.pe.sections]
-        if self.is_swift(section_names):
-            return "Swift"
-
-        # Check for managed code (.NET)
-        if nt_header.OPTIONAL_HEADER.DATA_DIRECTORY[14].VirtualAddress != 0:
-            return "CLI"
-
-        # Determine based on PE Header offset
-        if dos_header.e_lfanew == 0x80:
-            offset_choice = "GCC_VS"
-        elif dos_header.e_lfanew == 0x78:
-            offset_choice = "Clang"
-        elif dos_header.e_lfanew >= 0x80:
-            try:
-                val1 = self.br.read_int(0x80)
-                val2 = self.br.read_int(0x84)
-                if val1 != 0 and val2 != 0 and (val1 ^ val2) == 0x536e6144:  # "DanS"
-                    return "VisualStudio"
-                if dos_header.e_lfanew == 0x100:
-                    offset_choice = "BorlandPascal"
-                elif dos_header.e_lfanew == 0x200:
-                    offset_choice = "BorlandCpp"
-                elif dos_header.e_lfanew > 0x300:
-                    return "Unknown"
-            except Exception as e:
-                pass
-
-        return offset_choice
-
-    def is_rust(self):
-        # Check for Rust specific indicators in the PE file
-        # This function needs to be implemented based on Rust-specific details
-        return False
-
-    def is_swift(self, section_names):
-        # Check for Swift specific sections
-        swift_sections = [".swift1", ".swift2", ".swift3"]
-        return any(section in section_names for section in swift_sections)
-
-    class BinaryReader:
-        def __init__(self, pe):
-            self.data = pe.__data__
-
-        def read_int(self, offset):
-            return int.from_bytes(self.data[offset:offset + 4], byteorder='little')
 
 
 class ExecutableAnalyzer:
@@ -124,7 +56,7 @@ class PyDeconcrete:
         for i in range(SECRET_KEY_LEN):
             key.append(secret_key[i] ^ (secret_num - i))
         # https://github.com/Falldog/pyconcrete/blob/master/setup.py#L107
-        self.key = key
+        self.key = bytes(key)
 
     def decrypt_file(self, pye_path):
         pye_path = pathlib.Path(pye_path)
@@ -135,14 +67,15 @@ class PyDeconcrete:
 
         pyc_path = pye_path.with_suffix('.pyc')
         if pyc_path.exists():
-            raise Exception(f'Can\'t ovveride existing file {pyc_path}')
+            raise Exception(f'Can\'t override existing file {pyc_path.absolute()}')
 
         with open(pye_path, 'rb') as pye:
             decrypted_pye = self.decrypt_buffer(pye.read())
-        with open(pyc_path, 'rb') as pyc:
+
+        with open(pyc_path, 'wb') as pyc:
             pyc.write(decrypted_pye)
 
-        return pyc_path
+        return pyc_path.absolute()
 
     def decrypt_buffer(self, cipher_buf):
         # https://github.com/Falldog/pyconcrete/blob/master/src/pyconcrete_ext/pyconcrete.c#L173
@@ -182,6 +115,7 @@ class PyDeconcrete:
 
         return bytes(plain_buf)
 
+
 def main():
     banner = r"""
                  ____                                     _       
@@ -194,29 +128,41 @@ def main():
     print(banner)
 
     parser = argparse.ArgumentParser(
-        description='Extract secret key from a "pyconcrete" executable to decrypt bound .pye files.')
-    parser.add_argument('pyconcrete', type=str, help='Path to the pyconcrete excecutable installed in your system path (ex: /usr/local/bin).')
-    parser.add_argument('pye', type=str, help='Path to the encrypted .py file.')
+        description='Extract secret key from a "pyconcrete" executable to decrypt associated .pye files.',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument('pyconcrete', type=str,
+                        help='Path to the pyconcrete executable installed in your system path (ex: /usr/local/bin).')
+    parser.add_argument('pye', type=str, help='Path to the encrypted .pye file.')
+    parser.add_argument("-L", "--secret-key-len", type=int, help="Change default SECRET_KEY_LEN", default=16,
+                        required=False)
     args = parser.parse_args()
 
-    print('Analyzing file...')
-    ea = ExecutableAnalyzer(args.pyconcrete)
-    os, endian, arch, compiler = ea.analyze_file()
-    print(f"[+] Executable Type: {os}, endian: {endian}, arch: {arch}, compiler: {compiler}\n")
+    logger = logging.getLogger('pyDeconcrete')
 
-    print('Extracting crypto keys from file...')
-    disassembler = exe_disassembler(filepath=args.file, mode=arch)
-    secret_key, secret_num = disassembler.get_secrets()
+    try:
+        print('Analyzing file...')
+        ea = ExecutableAnalyzer(args.pyconcrete)
+        os, endian, arch, compiler = ea.analyze_file()
+        print(f"[+] Executable Type: {os}, endian: {endian}, arch: {arch}, compiler: {compiler}\n")
 
-    if secret_key and secret_num:
-        print('[*] Successfully extracted SECRET_KEY and SECRET_NUM!')
+        print('Extracting crypto keys from file...')
+        disassembler = WindowsDisassembler(filepath=args.pyconcrete, mode=arch, secret_key_len=SECRET_KEY_LEN)
+        secret_key, secret_num = disassembler.get_secrets()
 
-    print('Computing final key and decoding file...')
-    deconcrete = PyDeconcrete(secret_key, secret_num)
-    output_filepath = deconcrete.decrypt_file(args.pye)
+        if secret_key and secret_num:
+            print('[*] Successfully extracted SECRET_KEY and SECRET_NUM!\n')
 
-    print(f'Successfully decrypted file!')
-    print(f'Output file at: {output_filepath}')
+        print('Computing final key and decoding file...')
+        deconcrete = PyDeconcrete(secret_key, secret_num)
+        print(f'[-] Decoded key: {deconcrete.key}')
+        output_filepath = deconcrete.decrypt_file(args.pye)
+
+        print(f'[*] Successfully decrypted file!')
+        print(f'[+] Output file at: {output_filepath}')
+
+        print('To get the .py source code, please use a decompiler like pycdc.')
+    except Exception as err:
+        logger.error(err)
 
 
 if __name__ == "__main__":
